@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
@@ -88,21 +88,56 @@ def _cached_historico_precos(ticker_formatado: str, periodo: str) -> pd.DataFram
 def _cached_indicadores_fundamentais(ticker_formatado: str) -> Dict:
     try:
         stock = yf.Ticker(ticker_formatado)
-        info = stock.info
+        info = stock.info or {}
+        historico = stock.history(period='1y')
+
+        preco_referencia = _safe_float(info.get('currentPrice')) or _safe_float(info.get('regularMarketPrice'))
+        if (preco_referencia is None) and not historico.empty:
+            preco_referencia = float(historico['Close'].iloc[-1])
+
+        dividend_yield_info = _safe_float(info.get('dividendYield'))
+        dividend_yield = dividend_yield_info * 100 if dividend_yield_info is not None else None
+
+        if (dividend_yield is None or dividend_yield == 0) and preco_referencia:
+            dividend_series = stock.dividends
+            if dividend_series is not None and not dividend_series.empty:
+                cutoff = datetime.now() - timedelta(days=365)
+                dividendos_12m = dividend_series[dividend_series.index >= cutoff].sum()
+                if dividendos_12m and dividendos_12m > 0:
+                    dividend_yield = float(dividendos_12m / preco_referencia * 100)
+
+        pe_ratio = _safe_float(info.get('trailingPE'))
+        pb_ratio = _safe_float(info.get('priceToBook'))
+        roe = _safe_float(info.get('returnOnEquity'))
+        debt_to_equity = _safe_float(info.get('debtToEquity'))
+        profit_margin = _safe_float(info.get('profitMargins'))
+        beta = _safe_float(info.get('beta'))
+        eps = _safe_float(info.get('trailingEps'))
+        book_value = _safe_float(info.get('bookValue'))
+        market_cap = _safe_float(info.get('marketCap'))
+
         return {
-            'pe_ratio': info.get('trailingPE'),
-            'pb_ratio': info.get('priceToBook'),
-            'dividend_yield': (info.get('dividendYield') or 0) * 100,
-            'roe': info.get('returnOnEquity'),
-            'debt_to_equity': info.get('debtToEquity'),
-            'profit_margin': info.get('profitMargins'),
-            'beta': info.get('beta'),
-            'eps': info.get('trailingEps'),
-            'book_value': info.get('bookValue'),
-            'market_cap': info.get('marketCap')
+            'pe_ratio': pe_ratio,
+            'pb_ratio': pb_ratio,
+            'dividend_yield': dividend_yield,
+            'roe': roe,
+            'debt_to_equity': debt_to_equity,
+            'profit_margin': profit_margin,
+            'beta': beta,
+            'eps': eps,
+            'book_value': book_value,
+            'market_cap': market_cap,
+            'preco_referencia': preco_referencia
         }
     except Exception:
         return {}
+
+
+def _safe_float(value: Optional[float]) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -112,6 +147,7 @@ class AnaliseTecnica:
     score: float
     detalhes: Dict[str, float]
     comentario: str
+    eventos: List[str]
 
 class FonteDados(ABC):
     @abstractmethod
@@ -513,6 +549,10 @@ class AnaliseTecnicaIndicadores:
             'medio': 50,
             'longo': 200
         }
+        self.periodos_wma = {
+            'curto': 21,
+            'longo': 89
+        }
 
     def avaliar(self, historico_precos: pd.DataFrame) -> AnaliseTecnica:
         if historico_precos.empty or len(historico_precos) < self.periodos_sma['longo']:
@@ -521,7 +561,8 @@ class AnaliseTecnicaIndicadores:
                 tendencia='Indefinida',
                 score=50.0,
                 detalhes={},
-                comentario='Histórico insuficiente para análise técnica confiável.'
+                comentario='Histórico insuficiente para análise técnica confiável.',
+                eventos=[]
             )
 
         df = historico_precos.copy()
@@ -534,6 +575,8 @@ class AnaliseTecnicaIndicadores:
         rsi_14 = ta.rsi(close, length=14)
         macd_df = ta.macd(close)
         adx_df = ta.adx(df['High'], df['Low'], df['Close'])
+        wma_curto = ta.wma(close, length=self.periodos_wma['curto'])
+        wma_longo = ta.wma(close, length=self.periodos_wma['longo'])
 
         valor_atual = float(close.iloc[-1])
         sma_curto_val = float(sma_curto.iloc[-1])
@@ -546,63 +589,89 @@ class AnaliseTecnicaIndicadores:
         macd_hist_val = float(macd_df['MACDh_12_26_9'].iloc[-1])
         adx_val = float(adx_df['ADX_14'].iloc[-1]) if not np.isnan(adx_df['ADX_14'].iloc[-1]) else 15.0
 
+        wma_curto_valid = wma_curto.dropna()
+        wma_longo_valid = wma_longo.dropna()
+        wma_curto_val = float(wma_curto_valid.iloc[-1]) if not wma_curto_valid.empty else float('nan')
+        wma_longo_val = float(wma_longo_valid.iloc[-1]) if not wma_longo_valid.empty else float('nan')
+        wma_diff_series = (wma_curto - wma_longo).dropna()
+        wma_diff = float(wma_diff_series.iloc[-1]) if not wma_diff_series.empty else wma_curto_val - wma_longo_val
+        wma_prev_diff = float(wma_diff_series.iloc[-2]) if len(wma_diff_series) > 1 else wma_diff
+
         score = 50.0
-        comentarios = []
+        observacoes = []
+        eventos = []
 
         if valor_atual > sma_curto_val:
             score += 8
-            comentarios.append('Preço acima da média curta, momentum positivo.')
+            observacoes.append('Preço acima da média curta, momentum positivo.')
         else:
             score -= 8
-            comentarios.append('Preço abaixo da média curta, pressão vendedora no curto prazo.')
+            observacoes.append('Preço abaixo da média curta, pressão vendedora no curto prazo.')
 
         if sma_medio_val > sma_longo_val:
             score += 12
-            comentarios.append('SMA50 acima da SMA200 sinaliza tendência principal de alta.')
+            observacoes.append('SMA50 acima da SMA200 sinaliza tendência principal de alta.')
         else:
             score -= 12
-            comentarios.append('SMA50 abaixo da SMA200 sugere tendência principal de baixa.')
+            observacoes.append('SMA50 abaixo da SMA200 sugere tendência principal de baixa.')
 
         if ema_9_val > sma_curto_val:
             score += 6
-            comentarios.append('EMA9 sustentada acima da média curta reforça compra.')
+            observacoes.append('EMA9 sustentada acima da média curta reforça compra.')
         else:
             score -= 6
-            comentarios.append('EMA9 abaixo da média curta indica perda de fôlego de alta.')
+            observacoes.append('EMA9 abaixo da média curta indica perda de fôlego de alta.')
 
         if macd_hist_val > 0 and macd_val > macd_signal_val:
             score += 10
-            comentarios.append('MACD positivo reforça força compradora.')
+            observacoes.append('MACD positivo reforça força compradora.')
         elif macd_hist_val < 0 and macd_val < macd_signal_val:
             score -= 10
-            comentarios.append('MACD negativo evidencia força vendedora.')
+            observacoes.append('MACD negativo evidencia força vendedora.')
         else:
-            comentarios.append('MACD neutro, sem direção clara.')
+            observacoes.append('MACD neutro, sem direção clara.')
 
         if rsi_val < 30:
             score += 12
-            comentarios.append('RSI em sobrevenda sugere oportunidade de reversão.')
+            observacoes.append('RSI em sobrevenda sugere oportunidade de reversão.')
         elif rsi_val < 40:
             score += 8
-            comentarios.append('RSI baixo com chance de recuperação.')
+            observacoes.append('RSI baixo com chance de recuperação.')
         elif rsi_val > 70:
             score -= 12
-            comentarios.append('RSI em sobrecompra sinaliza possível correção.')
+            observacoes.append('RSI em sobrecompra sinaliza possível correção.')
         elif rsi_val > 60:
             score -= 6
-            comentarios.append('RSI elevado, atenção para realização de lucros.')
+            observacoes.append('RSI elevado, atenção para realização de lucros.')
         else:
             score += 4
-            comentarios.append('RSI equilibrado, mercado saudável.')
+            observacoes.append('RSI equilibrado, mercado saudável.')
 
         if adx_val > 25:
             score += 5
-            comentarios.append('ADX alto confirma força da tendência.')
+            observacoes.append('ADX alto confirma força da tendência.')
         elif adx_val < 15:
             score -= 5
-            comentarios.append('ADX baixo indica mercado lateral.')
+            observacoes.append('ADX baixo indica mercado lateral.')
         else:
-            comentarios.append('ADX neutro, tendência moderada.')
+            observacoes.append('ADX neutro, tendência moderada.')
+
+        if not np.isnan(wma_curto_val) and not np.isnan(wma_longo_val):
+            if wma_diff > 0:
+                score += 8
+                observacoes.append('WMA curta acima da longa indica viés altista no médio prazo.')
+            else:
+                score -= 8
+                observacoes.append('WMA curta abaixo da longa reforça viés baixista no médio prazo.')
+
+            if wma_prev_diff <= 0 < wma_diff:
+                eventos.append('Cruzamento altista recente das WMAs (curta cruzou acima da longa).')
+                score += 6
+            elif wma_prev_diff >= 0 > wma_diff:
+                eventos.append('Cruzamento baixista recente das WMAs (curta cruzou abaixo da longa).')
+                score -= 6
+            elif abs(wma_diff) < (0.002 * valor_atual):
+                observacoes.append('WMAs muito próximas: atenção para possível mudança de tendência.')
 
         score = max(0, min(100, score))
 
@@ -620,7 +689,8 @@ class AnaliseTecnicaIndicadores:
         else:
             tendencia = 'Lateral'
 
-        comentario_resumo = comentarios[0] if comentarios else 'Análise técnica inconclusiva.'
+        lista_eventos = eventos + observacoes
+        comentario_resumo = lista_eventos[0] if lista_eventos else 'Análise técnica inconclusiva.'
 
         detalhes = {
             'preco_atual': round(valor_atual, 2),
@@ -632,7 +702,10 @@ class AnaliseTecnicaIndicadores:
             'macd': round(macd_val, 4),
             'macd_signal': round(macd_signal_val, 4),
             'macd_hist': round(macd_hist_val, 4),
-            'adx_14': round(adx_val, 2)
+            'adx_14': round(adx_val, 2),
+            'wma_curta': round(wma_curto_val, 2) if not np.isnan(wma_curto_val) else None,
+            'wma_longa': round(wma_longo_val, 2) if not np.isnan(wma_longo_val) else None,
+            'wma_diff': round(wma_diff, 4) if not np.isnan(wma_diff) else None
         }
 
         return AnaliseTecnica(
@@ -640,7 +713,8 @@ class AnaliseTecnicaIndicadores:
             tendencia=tendencia,
             score=score,
             detalhes=detalhes,
-            comentario=comentario_resumo
+            comentario=comentario_resumo,
+            eventos=lista_eventos
         )
 
 class AnalisadorAcoes:
@@ -1026,11 +1100,15 @@ def exibir_resultado_completo(resultado, periodo):
 
         st.markdown("### 📈 Análise Técnica de Tendência")
         dados_tecnicos = pd.DataFrame(
-            [(chave, valor) for chave, valor in analise_tecnica.detalhes.items()],
+            [(chave, valor) for chave, valor in analise_tecnica.detalhes.items() if valor is not None],
             columns=['Indicador', 'Valor']
         )
         st.dataframe(dados_tecnicos, width='stretch', hide_index=True)
         st.markdown(f"**Resumo Técnico:** {analise_tecnica.comentario}")
+        if analise_tecnica.eventos:
+            st.markdown("**Eventos Recentes:**")
+            for evento in analise_tecnica.eventos[:5]:
+                st.markdown(f"- {evento}")
 
     # Justificativa e recomendação
     st.markdown("### 💡 Justificativa da Recomendação")
@@ -1076,6 +1154,10 @@ def exibir_resultado_completo(resultado, periodo):
         st.markdown("#### Indicadores Técnicos")
         st.write(f"**Sinal Técnico:** {analise_tecnica.sinal} ({analise_tecnica.score:.0f}/100)")
         st.write(f"**Resumo Técnico:** {analise_tecnica.comentario}")
+        if analise_tecnica.eventos:
+            st.markdown("**Eventos e Observações:**")
+            for evento in analise_tecnica.eventos:
+                st.write(f"- {evento}")
         for chave, valor in analise_tecnica.detalhes.items():
             st.write(f"- {chave}: {valor}")
 
