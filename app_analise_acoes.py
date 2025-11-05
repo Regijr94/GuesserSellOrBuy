@@ -105,6 +105,7 @@ def _cached_indicadores_fundamentais(ticker_formatado: str) -> Dict:
         return {}
 
 
+@dataclass
 class AnaliseTecnica:
     sinal: str
     tendencia: str
