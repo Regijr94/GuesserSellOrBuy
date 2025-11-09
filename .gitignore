@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*.pyc
 
 # Virtual environments
 venv/
@@ -22,6 +23,9 @@ ENV/
 Thumbs.db
 *.Zone.Identifier
 
+# Streamlit
+.streamlit/
+
 # Jupyter
 .ipynb_checkpoints/
 
@@ -33,4 +37,3 @@ Thumbs.db
 
 # Logs
 *.log
-
