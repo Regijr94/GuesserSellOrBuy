@@ -140,9 +140,63 @@ class BacktestHistorico:
         atr = true_range.rolling(periodo).mean()
         return atr
     
+    def _somar_ultimos_12_meses(self, df, data_limite, data_inicio_janela, campo):
+        """Soma valores dos últimos 12 meses (4 trimestres)"""
+        if df is None or df.empty:
+            return None
+        
+        # Filtrar colunas dentro da janela de 12 meses
+        colunas_validas = [col for col in df.columns 
+                         if isinstance(col, (pd.Timestamp, datetime)) 
+                         and col <= data_limite 
+                         and col >= data_inicio_janela]
+        
+        if not colunas_validas:
+            return None
+        
+        # Ordenar por data (mais recente primeiro) e pegar últimos 4 trimestres
+        colunas_ordenadas = sorted(colunas_validas, reverse=True)[:4]
+        
+        total = 0
+        for col in colunas_ordenadas:
+            try:
+                if campo in df.index:
+                    valor = df.loc[campo, col]
+                    if pd.notna(valor) and valor != 0:
+                        total += valor
+            except:
+                pass
+        
+        return total if total != 0 else None
+    
+    def _obter_valor_mais_recente(self, df, data_limite, campo):
+        """Obtém o valor mais recente antes da data limite"""
+        if df is None or df.empty:
+            return None
+        
+        colunas_validas = [col for col in df.columns 
+                         if isinstance(col, (pd.Timestamp, datetime)) 
+                         and col <= data_limite]
+        
+        if not colunas_validas:
+            return None
+        
+        colunas_ordenadas = sorted(colunas_validas, reverse=True)
+        
+        for col in colunas_ordenadas:
+            try:
+                if campo in df.index:
+                    valor = df.loc[campo, col]
+                    if pd.notna(valor) and valor != 0:
+                        return valor
+            except:
+                pass
+        
+        return None
+    
     def _adicionar_features_fundamentais(self, dados: pd.DataFrame) -> pd.DataFrame:
-        """Adiciona features fundamentais calculadas com janela de 1 ano a partir do primeiro dia do mês"""
-        print("Calculando indicadores fundamentais (PL e PVP) com janela de 1 ano...")
+        """Adiciona features fundamentais calculadas usando os últimos 12 meses de dados reais"""
+        print("Calculando indicadores fundamentais usando últimos 12 meses de dados reais...")
         
         # Inicializar colunas
         dados['P_L_ratio'] = np.nan
@@ -150,6 +204,7 @@ class BacktestHistorico:
         dados['ROE'] = np.nan
         dados['Dividend_Yield'] = np.nan
         dados['Debt_to_Equity'] = np.nan
+        dados['Margem_Liquida'] = np.nan
         dados['Current_Ratio'] = np.nan
         
         try:
@@ -157,36 +212,45 @@ class BacktestHistorico:
             acao = yf.Ticker(f"{self.ticker}.SA")
             info = acao.info
             
-            # Obter dados financeiros anuais
-            financials = acao.financials
+            # Obter dados financeiros trimestrais e anuais
+            financials = acao.financials  # Dados anuais
+            financials_quarterly = acao.quarterly_financials  # Dados trimestrais
             balance_sheet = acao.balance_sheet
+            balance_sheet_quarterly = acao.quarterly_balance_sheet
+            cashflow = acao.cashflow
+            cashflow_quarterly = acao.quarterly_cashflow
+            
+            # Obter histórico de dividendos
+            dividend_history = acao.dividends
             
             # Extrair informações básicas
             shares_outstanding = info.get('sharesOutstanding')
             if shares_outstanding is None or shares_outstanding <= 0:
                 shares_outstanding = info.get('impliedSharesOutstanding')
             
-            # Para cada data no DataFrame, calcular indicadores baseados no primeiro dia do mês
+            # Para cada data no DataFrame, calcular indicadores usando últimos 12 meses
             meses_processados = {}
             
-            for idx, data in enumerate(dados.index):
+            for data in dados.index:
                 # Obter primeiro dia do mês
                 primeiro_dia_mes = data.replace(day=1)
                 
                 # Se já processamos este mês, reutilizar valores
                 if primeiro_dia_mes in meses_processados:
-                    dados.loc[data, 'P_L_ratio'] = meses_processados[primeiro_dia_mes]['P_L_ratio']
-                    dados.loc[data, 'P_VP_ratio'] = meses_processados[primeiro_dia_mes]['P_VP_ratio']
-                    dados.loc[data, 'ROE'] = meses_processados[primeiro_dia_mes]['ROE']
-                    dados.loc[data, 'Dividend_Yield'] = meses_processados[primeiro_dia_mes]['Dividend_Yield']
+                    valores = meses_processados[primeiro_dia_mes]
+                    dados.loc[data, 'P_L_ratio'] = valores.get('P_L_ratio', np.nan)
+                    dados.loc[data, 'P_VP_ratio'] = valores.get('P_VP_ratio', np.nan)
+                    dados.loc[data, 'ROE'] = valores.get('ROE', np.nan)
+                    dados.loc[data, 'Dividend_Yield'] = valores.get('Dividend_Yield', np.nan)
+                    dados.loc[data, 'Debt_to_Equity'] = valores.get('Debt_to_Equity', np.nan)
+                    dados.loc[data, 'Margem_Liquida'] = valores.get('Margem_Liquida', np.nan)
                     continue
                 
-                # Calcular data de início (1 ano antes do primeiro dia do mês)
+                # Calcular data de início (12 meses antes do primeiro dia do mês)
                 data_inicio_janela = primeiro_dia_mes - timedelta(days=365)
                 
                 # Obter preço no primeiro dia do mês (ou próximo dia útil)
                 try:
-                    # Tentar obter preço no primeiro dia do mês
                     preco_data = dados.loc[primeiro_dia_mes:primeiro_dia_mes + timedelta(days=5), 'Close']
                     if len(preco_data) > 0:
                         preco = preco_data.iloc[0]
@@ -195,132 +259,128 @@ class BacktestHistorico:
                 except:
                     preco = dados.loc[data, 'Close']
                 
-                # Calcular PL (Preço/Lucro) usando janela de 1 ano
+                # 1. CALCULAR P/L (Preço/Lucro) usando lucro líquido dos últimos 12 meses
                 pl_ratio = None
-                if financials is not None and not financials.empty:
-                    # Procurar lucro líquido no período de 1 ano antes do primeiro dia do mês
-                    net_income = None
-                    # Ordenar colunas por data (mais recente primeiro)
-                    colunas_ordenadas = sorted([col for col in financials.columns if col <= primeiro_dia_mes], reverse=True)
-                    
-                    for col in colunas_ordenadas:
-                        # Verificar se a data está dentro da janela de 1 ano
-                        if col >= data_inicio_janela:
-                            if 'Net Income' in financials.index:
-                                try:
-                                    net_income = financials.loc['Net Income', col]
-                                except:
-                                    pass
-                            elif 'NetIncome' in financials.index:
-                                try:
-                                    net_income = financials.loc['NetIncome', col]
-                                except:
-                                    pass
-                            # Não usar estimativas - apenas dados reais
-                            
-                            if net_income is not None:
-                                break
-                    
-                    if net_income is not None and net_income > 0 and shares_outstanding and shares_outstanding > 0:
-                        eps = net_income / shares_outstanding
-                        if eps > 0:
-                            pl_ratio = preco / eps
+                net_income_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'Net Income')
+                if net_income_12m is None:
+                    # Tentar outros nomes de campo
+                    net_income_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'NetIncome')
+                if net_income_12m is None:
+                    # Tentar dados anuais
+                    net_income_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'Net Income')
+                    if net_income_12m is None:
+                        net_income_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'NetIncome')
                 
-                # Se não conseguiu calcular PL, tentar usar info do yfinance
+                if net_income_12m is not None and net_income_12m > 0 and shares_outstanding and shares_outstanding > 0:
+                    eps = net_income_12m / shares_outstanding
+                    if eps > 0:
+                        pl_ratio = preco / eps
+                
+                # Fallback para info do yfinance
                 if pl_ratio is None or not (0 < pl_ratio < 1000):
                     trailing_pe = info.get('trailingPE')
                     if trailing_pe and 0 < trailing_pe < 1000:
                         pl_ratio = trailing_pe
                 
-                # Calcular PVP (Preço/Valor Patrimonial) usando janela de 1 ano
+                # 2. CALCULAR P/VP (Preço/Valor Patrimonial) usando patrimônio líquido mais recente
                 pvp_ratio = None
-                if balance_sheet is not None and not balance_sheet.empty:
-                    # Procurar patrimônio líquido no período de 1 ano antes do primeiro dia do mês
-                    total_equity = None
-                    # Ordenar colunas por data (mais recente primeiro)
-                    colunas_ordenadas = sorted([col for col in balance_sheet.columns if col <= primeiro_dia_mes], reverse=True)
-                    
-                    for col in colunas_ordenadas:
-                        # Verificar se a data está dentro da janela de 1 ano
-                        if col >= data_inicio_janela:
-                            if 'Stockholders Equity' in balance_sheet.index:
-                                try:
-                                    total_equity = balance_sheet.loc['Stockholders Equity', col]
-                                except:
-                                    pass
-                            elif 'Total Stockholder Equity' in balance_sheet.index:
-                                try:
-                                    total_equity = balance_sheet.loc['Total Stockholder Equity', col]
-                                except:
-                                    pass
-                            
-                            if total_equity is not None:
-                                break
-                    
-                    if total_equity is not None and total_equity > 0 and shares_outstanding and shares_outstanding > 0:
-                        vpa = total_equity / shares_outstanding
-                        if vpa > 0:
-                            pvp_ratio = preco / vpa
+                total_equity = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Stockholders Equity')
+                if total_equity is None:
+                    total_equity = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Stockholder Equity')
+                if total_equity is None:
+                    total_equity = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Stockholders Equity')
+                    if total_equity is None:
+                        total_equity = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Stockholder Equity')
                 
-                # Se não conseguiu calcular PVP, tentar usar info do yfinance
+                if total_equity is not None and total_equity > 0 and shares_outstanding and shares_outstanding > 0:
+                    vpa = total_equity / shares_outstanding
+                    if vpa > 0:
+                        pvp_ratio = preco / vpa
+                
+                # Fallback para info do yfinance
                 if pvp_ratio is None or not (0 < pvp_ratio < 50):
                     price_to_book = info.get('priceToBook')
                     if price_to_book and 0 < price_to_book < 50:
                         pvp_ratio = price_to_book
                 
-                # Calcular ROE usando janela de 1 ano
+                # 3. CALCULAR ROE (Return on Equity) usando lucro líquido dos últimos 12 meses
                 roe = None
-                if financials is not None and balance_sheet is not None:
-                    net_income = None
-                    total_equity = None
-                    
-                    # Procurar lucro líquido na janela de 1 ano
-                    colunas_fin = sorted([col for col in financials.columns if col <= primeiro_dia_mes], reverse=True)
-                    for col in colunas_fin:
-                        if col >= data_inicio_janela:
-                            try:
-                                if 'Net Income' in financials.index:
-                                    net_income = financials.loc['Net Income', col]
-                                elif 'NetIncome' in financials.index:
-                                    net_income = financials.loc['NetIncome', col]
-                            except:
-                                pass
-                            if net_income is not None:
-                                break
-                    
-                    # Procurar patrimônio líquido na janela de 1 ano
-                    colunas_bs = sorted([col for col in balance_sheet.columns if col <= primeiro_dia_mes], reverse=True)
-                    for col in colunas_bs:
-                        if col >= data_inicio_janela:
-                            try:
-                                if 'Stockholders Equity' in balance_sheet.index:
-                                    total_equity = balance_sheet.loc['Stockholders Equity', col]
-                                elif 'Total Stockholder Equity' in balance_sheet.index:
-                                    total_equity = balance_sheet.loc['Total Stockholder Equity', col]
-                            except:
-                                pass
-                            if total_equity is not None:
-                                break
-                    
-                    if net_income is not None and total_equity is not None and total_equity > 0:
-                        roe = net_income / total_equity
+                # Usar o mesmo net_income_12m calculado para P/L
+                if net_income_12m is not None and net_income_12m != 0 and total_equity is not None and total_equity > 0:
+                    roe = net_income_12m / total_equity
                 
+                # Fallback para info do yfinance
                 if roe is None:
                     roe_info = info.get('returnOnEquity')
                     if roe_info and -1 < roe_info < 10:
                         roe = roe_info
                 
-                # Dividend Yield
-                dividend_yield = info.get('dividendYield')
-                if dividend_yield and not (0 <= dividend_yield <= 0.5):
-                    dividend_yield = None
+                # 4. CALCULAR DIVIDEND YIELD usando dividendos dos últimos 12 meses
+                dividend_yield = None
+                if dividend_history is not None and not dividend_history.empty:
+                    # Filtrar dividendos dos últimos 12 meses
+                    dividendos_12m = dividend_history[
+                        (dividend_history.index >= data_inicio_janela) & 
+                        (dividend_history.index <= primeiro_dia_mes)
+                    ]
+                    if not dividendos_12m.empty:
+                        total_dividendos_12m = dividendos_12m.sum()
+                        if total_dividendos_12m > 0 and preco > 0:
+                            dividend_yield = total_dividendos_12m / preco
+                
+                # Fallback para info do yfinance
+                if dividend_yield is None:
+                    dy_info = info.get('dividendYield')
+                    if dy_info and 0 <= dy_info <= 0.5:
+                        dividend_yield = dy_info
+                
+                # 5. CALCULAR MARGEM LÍQUIDA usando dados dos últimos 12 meses
+                margem_liquida = None
+                # Receita total dos últimos 12 meses
+                total_revenue_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'Total Revenue')
+                if total_revenue_12m is None:
+                    total_revenue_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'Revenue')
+                if total_revenue_12m is None:
+                    total_revenue_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'Total Revenue')
+                    if total_revenue_12m is None:
+                        total_revenue_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'Revenue')
+                
+                if net_income_12m is not None and total_revenue_12m is not None and total_revenue_12m > 0:
+                    margem_liquida = net_income_12m / total_revenue_12m
+                
+                # Fallback para info do yfinance
+                if margem_liquida is None:
+                    profit_margin = info.get('profitMargins')
+                    if profit_margin is not None and -1 < profit_margin < 1:
+                        margem_liquida = profit_margin
+                
+                # 6. CALCULAR DÍVIDA/PATRIMÔNIO (Debt to Equity) usando dados mais recentes
+                debt_to_equity = None
+                total_debt = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Debt')
+                if total_debt is None:
+                    total_debt = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Liabilities')
+                if total_debt is None:
+                    total_debt = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Debt')
+                    if total_debt is None:
+                        total_debt = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Liabilities')
+                
+                if total_debt is not None and total_equity is not None and total_equity > 0:
+                    debt_to_equity = total_debt / total_equity
+                
+                # Fallback para info do yfinance
+                if debt_to_equity is None:
+                    dte_info = info.get('debtToEquity')
+                    if dte_info and 0 <= dte_info <= 10:
+                        debt_to_equity = dte_info
                 
                 # Armazenar valores calculados
                 valores = {
                     'P_L_ratio': pl_ratio if pl_ratio and 0 < pl_ratio < 1000 else np.nan,
                     'P_VP_ratio': pvp_ratio if pvp_ratio and 0 < pvp_ratio < 50 else np.nan,
                     'ROE': roe if roe and -1 < roe < 10 else np.nan,
-                    'Dividend_Yield': dividend_yield if dividend_yield else np.nan
+                    'Dividend_Yield': dividend_yield if dividend_yield and 0 <= dividend_yield <= 0.5 else np.nan,
+                    'Debt_to_Equity': debt_to_equity if debt_to_equity and 0 <= debt_to_equity <= 10 else np.nan,
+                    'Margem_Liquida': margem_liquida if margem_liquida and -1 < margem_liquida < 1 else np.nan
                 }
                 
                 meses_processados[primeiro_dia_mes] = valores
@@ -330,113 +390,70 @@ class BacktestHistorico:
                 dados.loc[data, 'P_VP_ratio'] = valores['P_VP_ratio']
                 dados.loc[data, 'ROE'] = valores['ROE']
                 dados.loc[data, 'Dividend_Yield'] = valores['Dividend_Yield']
+                dados.loc[data, 'Debt_to_Equity'] = valores['Debt_to_Equity']
+                dados.loc[data, 'Margem_Liquida'] = valores['Margem_Liquida']
             
-            # Preencher valores NaN restantes com forward fill (usar último valor conhecido)
-            dados['P_L_ratio'] = dados['P_L_ratio'].ffill().bfill()
-            dados['P_VP_ratio'] = dados['P_VP_ratio'].ffill().bfill()
-            dados['ROE'] = dados['ROE'].ffill().bfill()
-            dados['Dividend_Yield'] = dados['Dividend_Yield'].ffill().bfill()
-            
-            # Calcular Debt_to_Equity e Current_Ratio usando dados reais históricos
+            # Calcular Current_Ratio usando dados mais recentes
             for data in dados.index:
                 primeiro_dia_mes = data.replace(day=1)
-                data_inicio_janela = primeiro_dia_mes - timedelta(days=365)
                 
-                # Se já processamos este mês e já temos Debt_to_Equity, reutilizar valores
-                if primeiro_dia_mes in meses_processados and 'Debt_to_Equity' in meses_processados[primeiro_dia_mes]:
-                    dados.loc[data, 'Debt_to_Equity'] = meses_processados[primeiro_dia_mes]['Debt_to_Equity']
+                # Se já processamos este mês, reutilizar valores
+                if primeiro_dia_mes in meses_processados and 'Current_Ratio' in meses_processados[primeiro_dia_mes]:
                     dados.loc[data, 'Current_Ratio'] = meses_processados[primeiro_dia_mes]['Current_Ratio']
                     continue
                 
-                # Garantir que o dicionário existe para este mês
-                if primeiro_dia_mes not in meses_processados:
-                    meses_processados[primeiro_dia_mes] = {}
-                
-                # Calcular Debt_to_Equity usando dados reais
-                debt_to_equity = None
-                if balance_sheet is not None and not balance_sheet.empty:
-                    total_debt = None
-                    total_equity = None
-                    
-                    colunas_bs = sorted([col for col in balance_sheet.columns if col <= primeiro_dia_mes], reverse=True)
-                    for col in colunas_bs:
-                        if col >= data_inicio_janela:
-                            try:
-                                # Tentar obter dívida total
-                                if 'Total Debt' in balance_sheet.index:
-                                    total_debt = balance_sheet.loc['Total Debt', col]
-                                elif 'Total Liabilities' in balance_sheet.index:
-                                    total_debt = balance_sheet.loc['Total Liabilities', col]
-                                
-                                # Obter patrimônio líquido
-                                if 'Stockholders Equity' in balance_sheet.index:
-                                    total_equity = balance_sheet.loc['Stockholders Equity', col]
-                                elif 'Total Stockholder Equity' in balance_sheet.index:
-                                    total_equity = balance_sheet.loc['Total Stockholder Equity', col]
-                                
-                                if total_debt is not None and total_equity is not None and total_equity > 0:
-                                    debt_to_equity = total_debt / total_equity
-                                    break
-                            except:
-                                pass
-                
-                # Se não conseguiu calcular, tentar usar info do yfinance
-                if debt_to_equity is None:
-                    debt_to_equity = info.get('debtToEquity')
-                    if debt_to_equity and not (0 <= debt_to_equity <= 10):
-                        debt_to_equity = None
-                
-                # Calcular Current_Ratio usando dados reais
+                # Calcular Current_Ratio usando dados mais recentes
                 current_ratio = None
-                if balance_sheet is not None and not balance_sheet.empty:
-                    current_assets = None
-                    current_liabilities = None
-                    
-                    colunas_bs = sorted([col for col in balance_sheet.columns if col <= primeiro_dia_mes], reverse=True)
-                    for col in colunas_bs:
-                        if col >= data_inicio_janela:
-                            try:
-                                if 'Current Assets' in balance_sheet.index:
-                                    current_assets = balance_sheet.loc['Current Assets', col]
-                                elif 'Total Current Assets' in balance_sheet.index:
-                                    current_assets = balance_sheet.loc['Total Current Assets', col]
-                                
-                                if 'Current Liabilities' in balance_sheet.index:
-                                    current_liabilities = balance_sheet.loc['Current Liabilities', col]
-                                elif 'Total Current Liabilities' in balance_sheet.index:
-                                    current_liabilities = balance_sheet.loc['Total Current Liabilities', col]
-                                
-                                if current_assets is not None and current_liabilities is not None and current_liabilities > 0:
-                                    current_ratio = current_assets / current_liabilities
-                                    break
-                            except:
-                                pass
+                current_assets = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Current Assets')
+                if current_assets is None:
+                    current_assets = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Current Assets')
+                if current_assets is None:
+                    current_assets = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Current Assets')
+                    if current_assets is None:
+                        current_assets = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Current Assets')
                 
-                # Se não conseguiu calcular, tentar usar info do yfinance
+                current_liabilities = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Current Liabilities')
+                if current_liabilities is None:
+                    current_liabilities = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Current Liabilities')
+                if current_liabilities is None:
+                    current_liabilities = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Current Liabilities')
+                    if current_liabilities is None:
+                        current_liabilities = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Current Liabilities')
+                
+                if current_assets is not None and current_liabilities is not None and current_liabilities > 0:
+                    current_ratio = current_assets / current_liabilities
+                
+                # Fallback para info do yfinance
                 if current_ratio is None:
                     current_ratio = info.get('currentRatio')
                     if current_ratio and not (0 < current_ratio <= 20):
                         current_ratio = None
                 
-                # Armazenar valores no dicionário de meses processados
-                meses_processados[primeiro_dia_mes]['Debt_to_Equity'] = debt_to_equity if debt_to_equity else np.nan
+                # Armazenar no dicionário
+                if primeiro_dia_mes not in meses_processados:
+                    meses_processados[primeiro_dia_mes] = {}
                 meses_processados[primeiro_dia_mes]['Current_Ratio'] = current_ratio if current_ratio else np.nan
-                
-                dados.loc[data, 'Debt_to_Equity'] = meses_processados[primeiro_dia_mes]['Debt_to_Equity']
                 dados.loc[data, 'Current_Ratio'] = meses_processados[primeiro_dia_mes]['Current_Ratio']
             
             # Preencher NaN apenas com forward/backward fill (dados reais anteriores/posteriores)
             # NÃO usar valores padrão simulados
+            dados['P_L_ratio'] = dados['P_L_ratio'].ffill().bfill()
+            dados['P_VP_ratio'] = dados['P_VP_ratio'].ffill().bfill()
+            dados['ROE'] = dados['ROE'].ffill().bfill()
+            dados['Dividend_Yield'] = dados['Dividend_Yield'].ffill().bfill()
             dados['Debt_to_Equity'] = dados['Debt_to_Equity'].ffill().bfill()
+            dados['Margem_Liquida'] = dados['Margem_Liquida'].ffill().bfill()
             dados['Current_Ratio'] = dados['Current_Ratio'].ffill().bfill()
             
             # Estatísticas dos indicadores calculados
-            pl_mean = dados['P_L_ratio'].mean()
-            pvp_mean = dados['P_VP_ratio'].mean()
-            print(f"Indicadores calculados com dados reais:")
-            print(f"  PL médio: {pl_mean:.2f}" if not np.isnan(pl_mean) else "  PL médio: N/A")
-            print(f"  PVP médio: {pvp_mean:.2f}" if not np.isnan(pvp_mean) else "  PVP médio: N/A")
-            print(f"  Dados reais: {dados[['P_L_ratio', 'P_VP_ratio', 'ROE', 'Dividend_Yield']].notna().sum().sum()} valores calculados")
+            indicadores = ['P_L_ratio', 'P_VP_ratio', 'ROE', 'Dividend_Yield', 'Debt_to_Equity', 'Margem_Liquida']
+            print("Indicadores calculados usando últimos 12 meses de dados reais:")
+            for ind in indicadores:
+                if ind in dados.columns:
+                    mean_val = dados[ind].mean()
+                    count_val = dados[ind].notna().sum()
+                    print(f"  {ind}: média={mean_val:.4f}" if not np.isnan(mean_val) else f"  {ind}: N/A", end="")
+                    print(f" ({count_val} valores calculados)")
             
         except Exception as e:
             print(f"Erro ao calcular indicadores fundamentais: {str(e)}")
@@ -854,7 +871,7 @@ class SistemaDeepLearning:
                 'Close', 'Volume', 'SMA_20', 'SMA_50', 'EMA_12', 'EMA_26',
                 'RSI', 'MACD', 'BB_upper', 'BB_middle', 'BB_lower', 'ATR',
                 'Volume_SMA', 'Price_Change', 'Volatility', 'P_L_ratio',
-                'P_VP_ratio', 'ROE', 'Dividend_Yield', 'Debt_to_Equity'
+                'P_VP_ratio', 'ROE', 'Dividend_Yield', 'Debt_to_Equity', 'Margem_Liquida'
             ]
         
         self.features_selecionadas = features
@@ -1240,7 +1257,6 @@ class SistemaDeepLearning:
     def _combinar_recomendacoes(self, sinal: Dict, risco: Dict) -> Dict:
         """Combina sinal de compra/venda com análise de risco"""
         recomendacao_sinal = sinal['recomendacao']
-        nivel_risco = risco['nivel_risco']
         score_risco = risco['score_risco']
         
         # Lógica de combinação
