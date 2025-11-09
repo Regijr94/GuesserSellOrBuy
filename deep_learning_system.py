@@ -198,14 +198,45 @@ class BacktestHistorico:
         """Adiciona features fundamentais calculadas usando os últimos 12 meses de dados reais"""
         print("Calculando indicadores fundamentais usando últimos 12 meses de dados reais...")
         
-        # Inicializar colunas
+        # Inicializar colunas - INDICADORES DE VALUATION
         dados['P_L_ratio'] = np.nan
         dados['P_VP_ratio'] = np.nan
-        dados['ROE'] = np.nan
         dados['Dividend_Yield'] = np.nan
+        dados['PEG_Ratio'] = np.nan
+        dados['EV_EBITDA'] = np.nan
+        dados['EV_EBIT'] = np.nan
+        dados['P_EBITDA'] = np.nan
+        dados['P_EBIT'] = np.nan
+        dados['VPA'] = np.nan
+        dados['P_Ativo'] = np.nan
+        dados['LPA'] = np.nan
+        dados['P_SR'] = np.nan
+        dados['P_Cap_Giro'] = np.nan
+        dados['P_Ativo_Circ_Liq'] = np.nan
+        
+        # INDICADORES DE ENDIVIDAMENTO
         dados['Debt_to_Equity'] = np.nan
-        dados['Margem_Liquida'] = np.nan
+        dados['Div_Liquida_EBITDA'] = np.nan
+        dados['Div_Liquida_EBIT'] = np.nan
+        dados['PL_Ativos'] = np.nan
+        dados['Passivos_Ativos'] = np.nan
         dados['Current_Ratio'] = np.nan
+        
+        # INDICADORES DE EFICIÊNCIA
+        dados['Margem_Bruta'] = np.nan
+        dados['Margem_EBITDA'] = np.nan
+        dados['Margem_EBIT'] = np.nan
+        dados['Margem_Liquida'] = np.nan
+        
+        # INDICADORES DE RENTABILIDADE
+        dados['ROE'] = np.nan
+        dados['ROA'] = np.nan
+        dados['ROIC'] = np.nan
+        dados['Giro_Ativos'] = np.nan
+        
+        # INDICADORES DE CRESCIMENTO
+        dados['CAGR_Receitas_5Y'] = np.nan
+        dados['CAGR_Lucros_5Y'] = np.nan
         
         try:
             # Obter objeto ticker
@@ -217,8 +248,6 @@ class BacktestHistorico:
             financials_quarterly = acao.quarterly_financials  # Dados trimestrais
             balance_sheet = acao.balance_sheet
             balance_sheet_quarterly = acao.quarterly_balance_sheet
-            cashflow = acao.cashflow
-            cashflow_quarterly = acao.quarterly_cashflow
             
             # Obter histórico de dividendos
             dividend_history = acao.dividends
@@ -238,12 +267,9 @@ class BacktestHistorico:
                 # Se já processamos este mês, reutilizar valores
                 if primeiro_dia_mes in meses_processados:
                     valores = meses_processados[primeiro_dia_mes]
-                    dados.loc[data, 'P_L_ratio'] = valores.get('P_L_ratio', np.nan)
-                    dados.loc[data, 'P_VP_ratio'] = valores.get('P_VP_ratio', np.nan)
-                    dados.loc[data, 'ROE'] = valores.get('ROE', np.nan)
-                    dados.loc[data, 'Dividend_Yield'] = valores.get('Dividend_Yield', np.nan)
-                    dados.loc[data, 'Debt_to_Equity'] = valores.get('Debt_to_Equity', np.nan)
-                    dados.loc[data, 'Margem_Liquida'] = valores.get('Margem_Liquida', np.nan)
+                    for key, value in valores.items():
+                        if key in dados.columns:
+                            dados.loc[data, key] = value
                     continue
                 
                 # Calcular data de início (12 meses antes do primeiro dia do mês)
@@ -373,37 +399,61 @@ class BacktestHistorico:
                     if dte_info and 0 <= dte_info <= 10:
                         debt_to_equity = dte_info
                 
-                # Armazenar valores calculados
-                valores = {
-                    'P_L_ratio': pl_ratio if pl_ratio and 0 < pl_ratio < 1000 else np.nan,
-                    'P_VP_ratio': pvp_ratio if pvp_ratio and 0 < pvp_ratio < 50 else np.nan,
-                    'ROE': roe if roe and -1 < roe < 10 else np.nan,
-                    'Dividend_Yield': dividend_yield if dividend_yield and 0 <= dividend_yield <= 0.5 else np.nan,
-                    'Debt_to_Equity': debt_to_equity if debt_to_equity and 0 <= debt_to_equity <= 10 else np.nan,
-                    'Margem_Liquida': margem_liquida if margem_liquida and -1 < margem_liquida < 1 else np.nan
-                }
+                # ========== CALCULAR INDICADORES ADICIONAIS ==========
                 
-                meses_processados[primeiro_dia_mes] = valores
+                # Obter dados adicionais necessários
+                market_cap = info.get('marketCap')
+                if market_cap is None or market_cap <= 0:
+                    market_cap = preco * shares_outstanding if shares_outstanding else None
                 
-                # Atribuir valores ao DataFrame
-                dados.loc[data, 'P_L_ratio'] = valores['P_L_ratio']
-                dados.loc[data, 'P_VP_ratio'] = valores['P_VP_ratio']
-                dados.loc[data, 'ROE'] = valores['ROE']
-                dados.loc[data, 'Dividend_Yield'] = valores['Dividend_Yield']
-                dados.loc[data, 'Debt_to_Equity'] = valores['Debt_to_Equity']
-                dados.loc[data, 'Margem_Liquida'] = valores['Margem_Liquida']
-            
-            # Calcular Current_Ratio usando dados mais recentes
-            for data in dados.index:
-                primeiro_dia_mes = data.replace(day=1)
+                # Calcular EBITDA e EBIT dos últimos 12 meses
+                ebitda_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'EBITDA')
+                if ebitda_12m is None:
+                    ebitda_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'EBITDA')
                 
-                # Se já processamos este mês, reutilizar valores
-                if primeiro_dia_mes in meses_processados and 'Current_Ratio' in meses_processados[primeiro_dia_mes]:
-                    dados.loc[data, 'Current_Ratio'] = meses_processados[primeiro_dia_mes]['Current_Ratio']
-                    continue
+                ebit_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'EBIT')
+                if ebit_12m is None:
+                    ebit_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'EBIT')
+                if ebit_12m is None:
+                    # EBIT pode ser calculado como: Receita - Custo dos Produtos Vendidos - Despesas Operacionais
+                    # Ou: EBITDA - Depreciação e Amortização
+                    if ebitda_12m is not None:
+                        # Tentar obter D&A
+                        da_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'Depreciation And Amortization')
+                        if da_12m is None:
+                            da_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'Depreciation And Amortization')
+                        if da_12m is not None:
+                            ebit_12m = ebitda_12m - da_12m
                 
-                # Calcular Current_Ratio usando dados mais recentes
-                current_ratio = None
+                # Calcular dívida líquida
+                cash = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Cash And Cash Equivalents')
+                if cash is None:
+                    cash = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Cash And Cash Equivalents')
+                if cash is None:
+                    cash = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Cash')
+                    if cash is None:
+                        cash = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Cash')
+                
+                divida_liquida = None
+                if total_debt is not None:
+                    divida_liquida = total_debt - (cash if cash is not None else 0)
+                
+                # Calcular ativos totais
+                total_assets = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Assets')
+                if total_assets is None:
+                    total_assets = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Assets')
+                
+                # Calcular passivos totais
+                total_liabilities = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Liabilities')
+                if total_liabilities is None:
+                    total_liabilities = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Liabilities')
+                
+                # Calcular receita bruta e custo dos produtos vendidos
+                gross_profit_12m = self._somar_ultimos_12_meses(financials_quarterly, primeiro_dia_mes, data_inicio_janela, 'Gross Profit')
+                if gross_profit_12m is None:
+                    gross_profit_12m = self._obter_valor_mais_recente(financials, primeiro_dia_mes, 'Gross Profit')
+                
+                # Calcular capital de giro (Ativo Circulante - Passivo Circulante)
                 current_assets = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Current Assets')
                 if current_assets is None:
                     current_assets = self._obter_valor_mais_recente(balance_sheet_quarterly, primeiro_dia_mes, 'Total Current Assets')
@@ -420,6 +470,8 @@ class BacktestHistorico:
                     if current_liabilities is None:
                         current_liabilities = self._obter_valor_mais_recente(balance_sheet, primeiro_dia_mes, 'Total Current Liabilities')
                 
+                # Calcular Current Ratio
+                current_ratio = None
                 if current_assets is not None and current_liabilities is not None and current_liabilities > 0:
                     current_ratio = current_assets / current_liabilities
                 
@@ -429,31 +481,301 @@ class BacktestHistorico:
                     if current_ratio and not (0 < current_ratio <= 20):
                         current_ratio = None
                 
-                # Armazenar no dicionário
-                if primeiro_dia_mes not in meses_processados:
-                    meses_processados[primeiro_dia_mes] = {}
-                meses_processados[primeiro_dia_mes]['Current_Ratio'] = current_ratio if current_ratio else np.nan
-                dados.loc[data, 'Current_Ratio'] = meses_processados[primeiro_dia_mes]['Current_Ratio']
+                working_capital = None
+                if current_assets is not None and current_liabilities is not None:
+                    working_capital = current_assets - current_liabilities
+                
+                # Calcular ativo circulante líquido (Ativo Circulante - Passivo Circulante)
+                ativo_circ_liq = working_capital
+                
+                # ========== INDICADORES DE VALUATION ADICIONAIS ==========
+                
+                # PEG Ratio = P/L / Taxa de Crescimento de Lucros
+                peg_ratio = None
+                if pl_ratio is not None and pl_ratio > 0:
+                    # Tentar obter PEG do yfinance
+                    peg_info = info.get('pegRatio')
+                    if peg_info and -10 < peg_info < 10:
+                        peg_ratio = peg_info
+                
+                # Enterprise Value
+                enterprise_value = None
+                if market_cap is not None:
+                    if divida_liquida is not None:
+                        enterprise_value = market_cap + divida_liquida
+                    else:
+                        enterprise_value = market_cap
+                
+                # EV/EBITDA
+                ev_ebitda = None
+                if enterprise_value is not None and ebitda_12m is not None and ebitda_12m > 0:
+                    ev_ebitda = enterprise_value / ebitda_12m
+                
+                # EV/EBIT
+                ev_ebit = None
+                if enterprise_value is not None and ebit_12m is not None and ebit_12m > 0:
+                    ev_ebit = enterprise_value / ebit_12m
+                
+                # P/EBITDA
+                p_ebitda = None
+                if ebitda_12m is not None and ebitda_12m > 0 and shares_outstanding and shares_outstanding > 0:
+                    ebitda_per_share = ebitda_12m / shares_outstanding
+                    if ebitda_per_share > 0:
+                        p_ebitda = preco / ebitda_per_share
+                
+                # P/EBIT
+                p_ebit = None
+                if ebit_12m is not None and ebit_12m > 0 and shares_outstanding and shares_outstanding > 0:
+                    ebit_per_share = ebit_12m / shares_outstanding
+                    if ebit_per_share > 0:
+                        p_ebit = preco / ebit_per_share
+                
+                # VPA (Valor Patrimonial por Ação) - já calculado como vpa
+                vpa = None
+                if total_equity is not None and shares_outstanding and shares_outstanding > 0:
+                    vpa = total_equity / shares_outstanding
+                
+                # P/Ativo
+                p_ativo = None
+                if total_assets is not None and total_assets > 0 and shares_outstanding and shares_outstanding > 0:
+                    ativo_per_share = total_assets / shares_outstanding
+                    if ativo_per_share > 0:
+                        p_ativo = preco / ativo_per_share
+                
+                # LPA (Lucro por Ação) - já calculado como eps
+                lpa = None
+                if net_income_12m is not None and net_income_12m > 0 and shares_outstanding and shares_outstanding > 0:
+                    lpa = net_income_12m / shares_outstanding
+                
+                # P/SR (Preço/Receita)
+                p_sr = None
+                if total_revenue_12m is not None and total_revenue_12m > 0 and shares_outstanding and shares_outstanding > 0:
+                    revenue_per_share = total_revenue_12m / shares_outstanding
+                    if revenue_per_share > 0:
+                        p_sr = preco / revenue_per_share
+                
+                # P/Cap. Giro (Preço/Capital de Giro)
+                p_cap_giro = None
+                if working_capital is not None and working_capital != 0 and shares_outstanding and shares_outstanding > 0:
+                    cap_giro_per_share = working_capital / shares_outstanding
+                    if cap_giro_per_share != 0:
+                        p_cap_giro = preco / cap_giro_per_share
+                
+                # P/Ativo Circ. Liq.
+                p_ativo_circ_liq = None
+                if ativo_circ_liq is not None and ativo_circ_liq != 0 and shares_outstanding and shares_outstanding > 0:
+                    ativo_circ_liq_per_share = ativo_circ_liq / shares_outstanding
+                    if ativo_circ_liq_per_share != 0:
+                        p_ativo_circ_liq = preco / ativo_circ_liq_per_share
+                
+                # ========== INDICADORES DE ENDIVIDAMENTO ADICIONAIS ==========
+                
+                # Dívida Líquida/EBITDA
+                div_liquida_ebitda = None
+                if divida_liquida is not None and ebitda_12m is not None and ebitda_12m > 0:
+                    div_liquida_ebitda = divida_liquida / ebitda_12m
+                
+                # Dívida Líquida/EBIT
+                div_liquida_ebit = None
+                if divida_liquida is not None and ebit_12m is not None and ebit_12m > 0:
+                    div_liquida_ebit = divida_liquida / ebit_12m
+                
+                # PL/Ativos
+                pl_ativos = None
+                if total_equity is not None and total_assets is not None and total_assets > 0:
+                    pl_ativos = total_equity / total_assets
+                
+                # Passivos/Ativos
+                passivos_ativos = None
+                if total_liabilities is not None and total_assets is not None and total_assets > 0:
+                    passivos_ativos = total_liabilities / total_assets
+                
+                # ========== INDICADORES DE EFICIÊNCIA ==========
+                
+                # Margem Bruta
+                margem_bruta = None
+                if gross_profit_12m is not None and total_revenue_12m is not None and total_revenue_12m > 0:
+                    margem_bruta = gross_profit_12m / total_revenue_12m
+                
+                # Margem EBITDA
+                margem_ebitda = None
+                if ebitda_12m is not None and total_revenue_12m is not None and total_revenue_12m > 0:
+                    margem_ebitda = ebitda_12m / total_revenue_12m
+                
+                # Margem EBIT
+                margem_ebit = None
+                if ebit_12m is not None and total_revenue_12m is not None and total_revenue_12m > 0:
+                    margem_ebit = ebit_12m / total_revenue_12m
+                
+                # ========== INDICADORES DE RENTABILIDADE ADICIONAIS ==========
+                
+                # ROA (Return on Assets)
+                roa = None
+                if net_income_12m is not None and total_assets is not None and total_assets > 0:
+                    roa = net_income_12m / total_assets
+                
+                # ROIC (Return on Invested Capital)
+                roic = None
+                # ROIC = (EBIT * (1 - Tax Rate)) / (Dívida + Patrimônio Líquido - Caixa)
+                if ebit_12m is not None and ebit_12m > 0:
+                    # Tentar obter taxa de imposto
+                    tax_rate = info.get('taxRate')
+                    if tax_rate is None:
+                        tax_rate = 0.34  # Taxa padrão Brasil
+                    
+                    invested_capital = None
+                    if total_debt is not None and total_equity is not None:
+                        invested_capital = total_debt + total_equity - (cash if cash is not None else 0)
+                    
+                    if invested_capital is not None and invested_capital > 0:
+                        nopat = ebit_12m * (1 - tax_rate)  # Net Operating Profit After Tax
+                        roic = nopat / invested_capital
+                
+                # Giro de Ativos (Asset Turnover)
+                giro_ativos = None
+                if total_revenue_12m is not None and total_assets is not None and total_assets > 0:
+                    giro_ativos = total_revenue_12m / total_assets
+                
+                # ========== INDICADORES DE CRESCIMENTO ==========
+                
+                # CAGR Receitas 5 anos
+                cagr_receitas_5y = None
+                if financials is not None and not financials.empty:
+                    # Obter receitas dos últimos 5 anos
+                    receitas_5y = []
+                    for col in sorted(financials.columns, reverse=True)[:5]:
+                        try:
+                            if 'Total Revenue' in financials.index:
+                                rev = financials.loc['Total Revenue', col]
+                            elif 'Revenue' in financials.index:
+                                rev = financials.loc['Revenue', col]
+                            else:
+                                rev = None
+                            
+                            if rev is not None and pd.notna(rev) and rev > 0:
+                                receitas_5y.append(rev)
+                        except:
+                            pass
+                    
+                    if len(receitas_5y) >= 2:
+                        receita_inicial = receitas_5y[-1]
+                        receita_final = receitas_5y[0]
+                        if receita_inicial > 0:
+                            cagr_receitas_5y = ((receita_final / receita_inicial) ** (1 / len(receitas_5y)) - 1) if len(receitas_5y) > 1 else None
+                
+                # CAGR Lucros 5 anos
+                cagr_lucros_5y = None
+                if financials is not None and not financials.empty:
+                    # Obter lucros dos últimos 5 anos
+                    lucros_5y = []
+                    for col in sorted(financials.columns, reverse=True)[:5]:
+                        try:
+                            if 'Net Income' in financials.index:
+                                lucro = financials.loc['Net Income', col]
+                            elif 'NetIncome' in financials.index:
+                                lucro = financials.loc['NetIncome', col]
+                            else:
+                                lucro = None
+                            
+                            if lucro is not None and pd.notna(lucro):
+                                lucros_5y.append(lucro)
+                        except:
+                            pass
+                    
+                    if len(lucros_5y) >= 2:
+                        # Filtrar valores negativos ou zero
+                        lucros_validos = [l for l in lucros_5y if l > 0]
+                        if len(lucros_validos) >= 2:
+                            lucro_inicial = lucros_validos[-1]
+                            lucro_final = lucros_validos[0]
+                            if lucro_inicial > 0:
+                                cagr_lucros_5y = ((lucro_final / lucro_inicial) ** (1 / len(lucros_validos)) - 1) if len(lucros_validos) > 1 else None
+                
+                # Armazenar valores calculados
+                valores = {
+                    # VALUATION
+                    'P_L_ratio': pl_ratio if pl_ratio and 0 < pl_ratio < 1000 else np.nan,
+                    'P_VP_ratio': pvp_ratio if pvp_ratio and 0 < pvp_ratio < 50 else np.nan,
+                    'Dividend_Yield': dividend_yield if dividend_yield and 0 <= dividend_yield <= 0.5 else np.nan,
+                    'PEG_Ratio': peg_ratio if peg_ratio and -10 < peg_ratio < 10 else np.nan,
+                    'EV_EBITDA': ev_ebitda if ev_ebitda and 0 < ev_ebitda < 100 else np.nan,
+                    'EV_EBIT': ev_ebit if ev_ebit and 0 < ev_ebit < 100 else np.nan,
+                    'P_EBITDA': p_ebitda if p_ebitda and 0 < p_ebitda < 100 else np.nan,
+                    'P_EBIT': p_ebit if p_ebit and 0 < p_ebit < 100 else np.nan,
+                    'VPA': vpa if vpa and vpa > 0 else np.nan,
+                    'P_Ativo': p_ativo if p_ativo and 0 < p_ativo < 10 else np.nan,
+                    'LPA': lpa if lpa and lpa != 0 else np.nan,
+                    'P_SR': p_sr if p_sr and 0 < p_sr < 50 else np.nan,
+                    'P_Cap_Giro': p_cap_giro if p_cap_giro and -100 < p_cap_giro < 100 else np.nan,
+                    'P_Ativo_Circ_Liq': p_ativo_circ_liq if p_ativo_circ_liq and -100 < p_ativo_circ_liq < 100 else np.nan,
+                    
+                    # ENDIVIDAMENTO
+                    'Debt_to_Equity': debt_to_equity if debt_to_equity and 0 <= debt_to_equity <= 10 else np.nan,
+                    'Div_Liquida_EBITDA': div_liquida_ebitda if div_liquida_ebitda and -10 < div_liquida_ebitda < 50 else np.nan,
+                    'Div_Liquida_EBIT': div_liquida_ebit if div_liquida_ebit and -10 < div_liquida_ebit < 50 else np.nan,
+                    'PL_Ativos': pl_ativos if pl_ativos and 0 <= pl_ativos <= 1 else np.nan,
+                    'Passivos_Ativos': passivos_ativos if passivos_ativos and 0 <= passivos_ativos <= 1 else np.nan,
+                    'Current_Ratio': current_ratio if current_ratio and 0 < current_ratio <= 20 else np.nan,
+                    
+                    # EFICIÊNCIA
+                    'Margem_Bruta': margem_bruta if margem_bruta and -1 < margem_bruta < 1 else np.nan,
+                    'Margem_EBITDA': margem_ebitda if margem_ebitda and -1 < margem_ebitda < 1 else np.nan,
+                    'Margem_EBIT': margem_ebit if margem_ebit and -1 < margem_ebit < 1 else np.nan,
+                    'Margem_Liquida': margem_liquida if margem_liquida and -1 < margem_liquida < 1 else np.nan,
+                    
+                    # RENTABILIDADE
+                    'ROE': roe if roe and -1 < roe < 10 else np.nan,
+                    'ROA': roa if roa and -1 < roa < 1 else np.nan,
+                    'ROIC': roic if roic and -1 < roic < 1 else np.nan,
+                    'Giro_Ativos': giro_ativos if giro_ativos and 0 < giro_ativos < 10 else np.nan,
+                    
+                    # CRESCIMENTO
+                    'CAGR_Receitas_5Y': cagr_receitas_5y if cagr_receitas_5y and -1 < cagr_receitas_5y < 10 else np.nan,
+                    'CAGR_Lucros_5Y': cagr_lucros_5y if cagr_lucros_5y and -1 < cagr_lucros_5y < 10 else np.nan
+                }
+                
+                meses_processados[primeiro_dia_mes] = valores
+                
+                # Atribuir valores ao DataFrame
+                for key, value in valores.items():
+                    if key in dados.columns:
+                        dados.loc[data, key] = value
+            
+            # Current_Ratio já foi calculado no loop principal acima
             
             # Preencher NaN apenas com forward/backward fill (dados reais anteriores/posteriores)
             # NÃO usar valores padrão simulados
-            dados['P_L_ratio'] = dados['P_L_ratio'].ffill().bfill()
-            dados['P_VP_ratio'] = dados['P_VP_ratio'].ffill().bfill()
-            dados['ROE'] = dados['ROE'].ffill().bfill()
-            dados['Dividend_Yield'] = dados['Dividend_Yield'].ffill().bfill()
-            dados['Debt_to_Equity'] = dados['Debt_to_Equity'].ffill().bfill()
-            dados['Margem_Liquida'] = dados['Margem_Liquida'].ffill().bfill()
-            dados['Current_Ratio'] = dados['Current_Ratio'].ffill().bfill()
+            todas_colunas = ['P_L_ratio', 'P_VP_ratio', 'Dividend_Yield', 'PEG_Ratio', 'EV_EBITDA', 'EV_EBIT',
+                           'P_EBITDA', 'P_EBIT', 'VPA', 'P_Ativo', 'LPA', 'P_SR', 'P_Cap_Giro', 'P_Ativo_Circ_Liq',
+                           'Debt_to_Equity', 'Div_Liquida_EBITDA', 'Div_Liquida_EBIT', 'PL_Ativos', 'Passivos_Ativos', 'Current_Ratio',
+                           'Margem_Bruta', 'Margem_EBITDA', 'Margem_EBIT', 'Margem_Liquida',
+                           'ROE', 'ROA', 'ROIC', 'Giro_Ativos',
+                           'CAGR_Receitas_5Y', 'CAGR_Lucros_5Y']
+            
+            for col in todas_colunas:
+                if col in dados.columns:
+                    dados[col] = dados[col].ffill().bfill()
             
             # Estatísticas dos indicadores calculados
-            indicadores = ['P_L_ratio', 'P_VP_ratio', 'ROE', 'Dividend_Yield', 'Debt_to_Equity', 'Margem_Liquida']
             print("Indicadores calculados usando últimos 12 meses de dados reais:")
-            for ind in indicadores:
-                if ind in dados.columns:
-                    mean_val = dados[ind].mean()
-                    count_val = dados[ind].notna().sum()
-                    print(f"  {ind}: média={mean_val:.4f}" if not np.isnan(mean_val) else f"  {ind}: N/A", end="")
-                    print(f" ({count_val} valores calculados)")
+            categorias = {
+                'VALUATION': ['P_L_ratio', 'P_VP_ratio', 'Dividend_Yield', 'PEG_Ratio', 'EV_EBITDA', 'EV_EBIT', 'P_EBITDA', 'P_EBIT', 'VPA', 'P_Ativo', 'LPA', 'P_SR', 'P_Cap_Giro', 'P_Ativo_Circ_Liq'],
+                'ENDIVIDAMENTO': ['Debt_to_Equity', 'Div_Liquida_EBITDA', 'Div_Liquida_EBIT', 'PL_Ativos', 'Passivos_Ativos', 'Current_Ratio'],
+                'EFICIÊNCIA': ['Margem_Bruta', 'Margem_EBITDA', 'Margem_EBIT', 'Margem_Liquida'],
+                'RENTABILIDADE': ['ROE', 'ROA', 'ROIC', 'Giro_Ativos'],
+                'CRESCIMENTO': ['CAGR_Receitas_5Y', 'CAGR_Lucros_5Y']
+            }
+            
+            for categoria, indicadores in categorias.items():
+                print(f"\n  {categoria}:")
+                for ind in indicadores:
+                    if ind in dados.columns:
+                        mean_val = dados[ind].mean()
+                        count_val = dados[ind].notna().sum()
+                        if not np.isnan(mean_val):
+                            print(f"    {ind}: média={mean_val:.4f} ({count_val} valores)")
+                        else:
+                            print(f"    {ind}: N/A ({count_val} valores)")
             
         except Exception as e:
             print(f"Erro ao calcular indicadores fundamentais: {str(e)}")
@@ -868,10 +1190,23 @@ class SistemaDeepLearning:
         # Features padrão se não especificadas
         if features is None:
             features = [
+                # Técnicas
                 'Close', 'Volume', 'SMA_20', 'SMA_50', 'EMA_12', 'EMA_26',
                 'RSI', 'MACD', 'BB_upper', 'BB_middle', 'BB_lower', 'ATR',
-                'Volume_SMA', 'Price_Change', 'Volatility', 'P_L_ratio',
-                'P_VP_ratio', 'ROE', 'Dividend_Yield', 'Debt_to_Equity', 'Margem_Liquida'
+                'Volume_SMA', 'Price_Change', 'Volatility',
+                # Valuation
+                'P_L_ratio', 'P_VP_ratio', 'Dividend_Yield', 'PEG_Ratio',
+                'EV_EBITDA', 'EV_EBIT', 'P_EBITDA', 'P_EBIT', 'VPA', 'P_Ativo',
+                'LPA', 'P_SR', 'P_Cap_Giro', 'P_Ativo_Circ_Liq',
+                # Endividamento
+                'Debt_to_Equity', 'Div_Liquida_EBITDA', 'Div_Liquida_EBIT',
+                'PL_Ativos', 'Passivos_Ativos', 'Current_Ratio',
+                # Eficiência
+                'Margem_Bruta', 'Margem_EBITDA', 'Margem_EBIT', 'Margem_Liquida',
+                # Rentabilidade
+                'ROE', 'ROA', 'ROIC', 'Giro_Ativos',
+                # Crescimento
+                'CAGR_Receitas_5Y', 'CAGR_Lucros_5Y'
             ]
         
         self.features_selecionadas = features
